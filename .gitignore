@@ -1,0 +1,20 @@
+# Python backend
+backend/__pycache__/
+backend/**/__pycache__/
+backend/*.py[cod]
+backend/venv/
+backend/.env
+
+# JavaScript/TypeScript frontend
+frontend/node_modules/
+frontend/.next/
+frontend/.env.local
+frontend/out/
+frontend/build/
+frontend/npm-debug.log*
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+.DS_Store
