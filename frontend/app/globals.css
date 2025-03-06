@@ -1,0 +1,20 @@
+@import "tailwindcss/preflight";
+@tailwind utilities;
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-rgb: 255, 255, 255;
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background-color: rgb(var(--background-rgb));
+}
+
+/* Estilos adicionales pueden ir aquí */
+
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+} 

@@ -2,7 +2,7 @@
 Pydantic models for API responses.
 """
 from typing import Dict, List, Optional, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_serializer
 from datetime import datetime
 
 class Product(BaseModel):
@@ -48,6 +48,11 @@ class CartResponse(BaseModel):
     total: float = Field(..., description="Total cost including tax and shipping")
     created_at: datetime = Field(default_factory=datetime.now, description="Cart creation time")
     updated_at: datetime = Field(default_factory=datetime.now, description="Last update time")
+    
+    @field_serializer('created_at', 'updated_at')
+    def serialize_datetime(self, dt: datetime) -> str:
+        """Serialize datetime objects to ISO format strings."""
+        return dt.isoformat()
 
 class ChatResponse(BaseModel):
     """Response to a chat message."""
@@ -55,10 +60,16 @@ class ChatResponse(BaseModel):
     response: str = Field(..., description="AI assistant's response")
     requires_action: bool = Field(default=False, description="Whether the response requires user action")
     action_data: Optional[Dict[str, Any]] = Field(default=None, description="Data for required action")
-    suggested_products: Optional[List[Product]] = Field(default=None, description="Suggested products")
+    suggested_products: Optional[List[Dict[str, Any]]] = Field(default=None, description="Suggested products")
     
 class CheckoutResponse(BaseModel):
     """Response for checkout creation."""
     session_id: str = Field(..., description="Unique session identifier")
     checkout_url: str = Field(..., description="URL to complete checkout")
-    checkout_id: str = Field(..., description="Unique checkout identifier") 
+    checkout_id: str = Field(..., description="Unique checkout identifier")
+
+class ActionResult(BaseModel):
+    """Result of an action that required user confirmation."""
+    status: str = Field(..., description="Status of the action (success, error, cancelled)")
+    message: str = Field(..., description="Message describing the result")
+    data: Optional[Dict[str, Any]] = Field(default=None, description="Additional data about the result") 
