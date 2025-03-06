@@ -9,6 +9,7 @@ class ChatRequest(BaseModel):
     session_id: str = Field(..., description="Unique session identifier")
     message: str = Field(..., description="User's message text")
     context: Optional[Dict[str, Any]] = Field(default=None, description="Additional context for the agent")
+    image_data: Optional[str] = Field(default=None, description="Base64-encoded image data")
 
 class SearchRequest(BaseModel):
     """Product search request."""
@@ -33,4 +34,11 @@ class CheckoutRequest(BaseModel):
     success_url: str = Field(..., description="URL to redirect after successful payment")
     cancel_url: str = Field(..., description="URL to redirect if payment is cancelled")
     shipping_address: Optional[Dict[str, str]] = Field(default=None, description="Shipping address information")
-    billing_address: Optional[Dict[str, str]] = Field(default=None, description="Billing address information") 
+    billing_address: Optional[Dict[str, str]] = Field(default=None, description="Billing address information")
+
+class ActionConfirmation(BaseModel):
+    """Confirmation for an action that requires user approval."""
+    session_id: str = Field(..., description="Unique session identifier")
+    action_type: str = Field(..., description="Type of action to confirm (add_to_cart, checkout)")
+    action_data: Dict[str, Any] = Field(..., description="Data needed for the action")
+    confirmed: bool = Field(..., description="Whether the user confirmed the action") 

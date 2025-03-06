@@ -5,8 +5,9 @@ Implements a FastAPI application exposing the shopping assistant API.
 import os
 import json
 import logging
+import base64
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Depends, BackgroundTasks, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -14,8 +15,8 @@ from dotenv import load_dotenv
 
 # Local modules
 from app.agent.shopping_agent import ShoppingAgent
-from app.models.request_models import ChatRequest, SearchRequest, ProductRequest, CartAction, CheckoutRequest
-from app.models.response_models import ChatResponse, SearchResponse, ProductDetails, CartResponse, CheckoutResponse
+from app.models.request_models import ChatRequest, SearchRequest, ProductRequest, CartAction, CheckoutRequest, ActionConfirmation
+from app.models.response_models import ChatResponse, SearchResponse, ProductDetails, CartResponse, CheckoutResponse, ActionResult
 from app.services.product_service import ProductService
 from app.services.cart_service import CartService
 from app.services.payment_service import PaymentService
@@ -66,21 +67,117 @@ async def chat(request: ChatRequest):
         # Get or create an agent for this session
         if request.session_id not in agent_instances:
             agent_instances[request.session_id] = ShoppingAgent(
-                product_service=product_service
+                product_service=product_service,
+                cart_service=cart_service,
+                payment_service=payment_service
             )
         
         agent = agent_instances[request.session_id]
         
         # Process the message with the agent
-        response = agent.process_message(request.message, request.session_id)
+        result = agent.process_message(request.message, request.session_id, request.image_data)
         
         return ChatResponse(
             session_id=request.session_id,
-            response=response,
-            requires_action=False  # In MVP, we'll handle actions separately
+            response=result["response"],
+            suggested_products=result.get("suggested_products", []),
+            requires_action=result.get("requires_action", False),
+            action_data=result.get("action_data")
         )
     except Exception as e:
         logger.error(f"Error processing chat: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/chat/with-image", response_model=ChatResponse)
+async def chat_with_image(
+    session_id: str = Form(...),
+    message: str = Form(...),
+    image: UploadFile = File(...)  # Make image required instead of optional
+):
+    """Process a chat message with an image from the user."""
+    try:
+        # Get or create an agent for this session
+        if session_id not in agent_instances:
+            agent_instances[session_id] = ShoppingAgent(
+                product_service=product_service,
+                cart_service=cart_service,
+                payment_service=payment_service
+            )
+        
+        agent = agent_instances[session_id]
+        
+        # Process the image
+        image_data = None
+        if image and image.filename:
+            # Validate image content type
+            if not image.content_type or not image.content_type.startswith('image/'):
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Invalid file type. Only images are allowed."
+                )
+                
+            try:
+                contents = await image.read()
+                if contents:
+                    image_data = base64.b64encode(contents).decode("utf-8")
+                else:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Empty image file"
+                    )
+            except Exception as e:
+                logger.error(f"Error reading image: {str(e)}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error processing image: {str(e)}"
+                )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Image file is required"
+            )
+        
+        # Process the message with the agent
+        result = agent.process_message(message, session_id, image_data)
+        
+        return ChatResponse(
+            session_id=session_id,
+            response=result["response"],
+            suggested_products=result.get("suggested_products", []),
+            requires_action=result.get("requires_action", False),
+            action_data=result.get("action_data")
+        )
+    except HTTPException:
+        # Re-raise HTTP exceptions
+        raise
+    except Exception as e:
+        logger.error(f"Error processing chat with image: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/action/confirm", response_model=ActionResult)
+async def confirm_action(confirmation: ActionConfirmation):
+    """Confirm an action that requires user approval."""
+    try:
+        # Get the agent for this session
+        if confirmation.session_id not in agent_instances:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        agent = agent_instances[confirmation.session_id]
+        
+        # Execute the action
+        result = agent.execute_action(
+            confirmation.action_type,
+            confirmation.action_data,
+            confirmation.confirmed
+        )
+        
+        return ActionResult(
+            status=result.get("status", "error"),
+            message=result.get("message", "Unknown error"),
+            data=result
+        )
+    except Exception as e:
+        logger.error(f"Error confirming action: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/search", response_model=SearchResponse)
@@ -190,7 +287,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
     # Create agent for this session if it doesn't exist
     if session_id not in agent_instances:
         agent_instances[session_id] = ShoppingAgent(
-            product_service=product_service
+            product_service=product_service,
+            cart_service=cart_service,
+            payment_service=payment_service
         )
     
     agent = agent_instances[session_id]
@@ -202,15 +301,18 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
             message_data = json.loads(data)
             
             user_message = message_data.get("message", "")
+            image_data = message_data.get("image_data")
             
             # Process with the agent
-            response = agent.process_message(user_message, session_id)
+            result = agent.process_message(user_message, session_id, image_data)
             
             # Send response back to client
             await websocket.send_json({
                 "type": "message",
-                "content": response,
-                "requires_action": False
+                "content": result["response"],
+                "suggested_products": result.get("suggested_products", []),
+                "requires_action": result.get("requires_action", False),
+                "action_data": result.get("action_data")
             })
             
     except WebSocketDisconnect:

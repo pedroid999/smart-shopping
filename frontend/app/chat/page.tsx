@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-import ApiService from '../api/service';
 
 // Define message types
 type Message = {
@@ -25,6 +24,32 @@ type Product = {
   in_stock: boolean;
 };
 
+// Define cart type
+type Cart = {
+  session_id: string;
+  items: Array<{
+    product: Product;
+    quantity: number;
+    item_total: number;
+  }>;
+  subtotal: number;
+  tax?: number;
+  shipping?: number;
+  total: number;
+};
+
+// Define action data type
+type ActionData = {
+  type: string;
+  product?: Product;
+  quantity?: number;
+  session_id: string;
+  cart?: Cart;
+  email?: string;
+  success_url?: string;
+  cancel_url?: string;
+};
+
 export default function ChatPage() {
   // State for messages, input, and session
   const [messages, setMessages] = useState<Message[]>([]);
@@ -32,8 +57,13 @@ export default function ChatPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState('');
   const [suggestedProducts, setSuggestedProducts] = useState<Product[]>([]);
+  const [requiresAction, setRequiresAction] = useState(false);
+  const [actionData, setActionData] = useState<ActionData | null>(null);
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
   
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Initialize session ID on component mount
   useEffect(() => {
@@ -61,7 +91,7 @@ export default function ChatPage() {
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!input.trim() || isLoading) return;
+    if ((!input.trim() && !selectedImage) || isLoading) return;
     
     // Add user message to chat
     const userMessage: Message = {
@@ -76,17 +106,73 @@ export default function ChatPage() {
     setIsLoading(true);
     
     try {
-      // In MVP, we'll use the REST API endpoint
-      // In production, we might use WebSockets for real-time communication
-      const response = await ApiService.sendChatMessage({
-        session_id: sessionId,
-        message: userMessage.content,
-      });
+      let response;
+      
+      // If there's an image, use the multipart/form-data endpoint
+      if (selectedImage) {
+        const formData = new FormData();
+        formData.append('session_id', sessionId);
+        formData.append('message', input.trim() ? input : 'Here is an image I want to share.');
+        formData.append('image', selectedImage);
+        
+        try {
+          response = await fetch('http://localhost:8000/api/chat/with-image', {
+            method: 'POST',
+            body: formData,
+          });
+          
+          if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+            throw new Error(errorData.detail || `Error: ${response.status}`);
+          }
+        } catch (error) {
+          console.error('Image upload error:', error);
+          
+          // Add error message to chat
+          const errorMessage: Message = {
+            id: `error_${Date.now()}`,
+            content: `Sorry, I couldn't process your image. ${error instanceof Error ? error.message : 'Please try again.'}`,
+            sender: 'assistant',
+            timestamp: new Date(),
+          };
+          
+          setMessages((prev) => [...prev, errorMessage]);
+          setIsLoading(false);
+          
+          // Clear the image after error
+          setSelectedImage(null);
+          setImagePreview(null);
+          
+          return; // Exit early
+        }
+        
+        // Clear the image after successful sending
+        setSelectedImage(null);
+        setImagePreview(null);
+      } else {
+        // Otherwise use the regular JSON endpoint
+        response = await fetch('http://localhost:8000/api/chat', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            message: userMessage.content,
+          }),
+        });
+      }
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const data = await response.json();
       
       // Add assistant response to chat
       const assistantMessage: Message = {
         id: `assistant_${Date.now()}`,
-        content: response.response,
+        content: data.response,
         sender: 'assistant',
         timestamp: new Date(),
       };
@@ -94,8 +180,14 @@ export default function ChatPage() {
       setMessages((prev) => [...prev, assistantMessage]);
       
       // Check if there are suggested products
-      if (response.suggested_products && response.suggested_products.length > 0) {
-        setSuggestedProducts(response.suggested_products);
+      if (data.suggested_products && data.suggested_products.length > 0) {
+        setSuggestedProducts(data.suggested_products);
+      }
+      
+      // Check if there's an action that requires user confirmation
+      if (data.requires_action && data.action_data) {
+        setRequiresAction(true);
+        setActionData(data.action_data);
       }
     } catch (error) {
       console.error('Error sending message:', error);
@@ -114,6 +206,96 @@ export default function ChatPage() {
     }
   };
 
+  // Handle confirming an action
+  const handleConfirmAction = async (confirmed: boolean) => {
+    if (!actionData) return;
+    
+    try {
+      setIsLoading(true);
+      
+      const response = await fetch('http://localhost:8000/api/action/confirm', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          session_id: sessionId,
+          action_type: actionData.type,
+          action_data: actionData,
+          confirmed,
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      const result = await response.json();
+      
+      // Add confirmation message to chat
+      const confirmationMessage: Message = {
+        id: `confirmation_${Date.now()}`,
+        content: confirmed 
+          ? result.message || 'Action confirmed successfully.' 
+          : 'Action cancelled.',
+        sender: 'assistant',
+        timestamp: new Date(),
+      };
+      
+      setMessages((prev) => [...prev, confirmationMessage]);
+      
+      // If it was a checkout action and it was successful, redirect to checkout URL
+      if (confirmed && actionData.type === 'checkout' && result.status === 'success' && result.data?.checkout?.checkout_url) {
+        window.location.href = result.data.checkout.checkout_url;
+      }
+    } catch (error) {
+      console.error('Error confirming action:', error);
+      
+      // Add error message
+      const errorMessage: Message = {
+        id: `error_${Date.now()}`,
+        content: 'Sorry, I encountered an error processing your request.',
+        sender: 'assistant',
+        timestamp: new Date(),
+      };
+      
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setIsLoading(false);
+      setRequiresAction(false);
+      setActionData(null);
+    }
+  };
+
+  // Handle image selection
+  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      const file = e.target.files[0];
+      setSelectedImage(file);
+      
+      // Create a preview
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setImagePreview(reader.result as string);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // Handle clicking the image upload button
+  const handleImageUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  // Handle removing the selected image
+  const handleRemoveImage = () => {
+    setSelectedImage(null);
+    setImagePreview(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div className="flex flex-col h-screen bg-gray-50">
       {/* Header */}
@@ -125,50 +307,143 @@ export default function ChatPage() {
         </div>
       </header>
       
-      {/* Chat container */}
-      <div className="flex-1 overflow-hidden flex flex-col max-w-7xl w-full mx-auto p-4">
-        {/* Messages area */}
-        <div className="flex-1 overflow-y-auto mb-4 space-y-4">
-          {messages.map((message) => (
-            <div
-              key={message.id}
-              className={`flex ${
-                message.sender === 'user' ? 'justify-end' : 'justify-start'
-              }`}
-            >
+      {/* Main content */}
+      <div className="flex-1 overflow-hidden flex flex-row max-w-7xl w-full mx-auto p-4">
+        {/* Chat area */}
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {/* Messages area */}
+          <div className="flex-1 overflow-y-auto mb-4 space-y-4">
+            {messages.map((message) => (
               <div
-                className={`max-w-[80%] rounded-lg px-4 py-2 ${
-                  message.sender === 'user'
-                    ? 'bg-blue-500 text-white'
-                    : 'bg-gray-200 text-gray-800'
+                key={message.id}
+                className={`flex ${
+                  message.sender === 'user' ? 'justify-end' : 'justify-start'
                 }`}
               >
-                <p className="whitespace-pre-wrap">{message.content}</p>
-                <p className="text-xs opacity-70 mt-1">
-                  {message.timestamp.toLocaleTimeString()}
-                </p>
+                <div
+                  className={`max-w-[80%] rounded-lg px-4 py-2 ${
+                    message.sender === 'user'
+                      ? 'bg-blue-500 text-white'
+                      : 'bg-gray-200 text-gray-800'
+                  }`}
+                >
+                  <p className="whitespace-pre-wrap">{message.content}</p>
+                  <p className="text-xs opacity-70 mt-1">
+                    {message.timestamp.toLocaleTimeString()}
+                  </p>
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
+            
+            {/* Loading indicator */}
+            {isLoading && (
+              <div className="flex justify-start">
+                <div className="bg-gray-200 text-gray-800 rounded-lg px-4 py-2">
+                  <p className="animate-pulse">Thinking...</p>
+                </div>
+              </div>
+            )}
+            
+            {/* Scroll anchor */}
+            <div ref={messagesEndRef} />
+          </div>
           
-          {/* Loading indicator */}
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="bg-gray-200 text-gray-800 rounded-lg px-4 py-2">
-                <p className="animate-pulse">Thinking...</p>
+          {/* Action confirmation */}
+          {requiresAction && actionData && (
+            <div className="mb-4 p-4 border border-yellow-300 bg-yellow-50 rounded-lg">
+              <h3 className="text-lg font-medium mb-2">Confirm Action</h3>
+              
+              {actionData.type === 'add_to_cart' && actionData.product && (
+                <div>
+                  <p>Add to cart: {actionData.product.name}</p>
+                  <p>Quantity: {actionData.quantity || 1}</p>
+                  <p>Price: ${actionData.product.price.toFixed(2)}</p>
+                </div>
+              )}
+              
+              {actionData.type === 'checkout' && (
+                <div>
+                  <p>Proceed to checkout</p>
+                  <p>Total: ${actionData.cart?.total.toFixed(2) || '0.00'}</p>
+                </div>
+              )}
+              
+              <div className="flex mt-4 space-x-2">
+                <button
+                  onClick={() => handleConfirmAction(true)}
+                  className="bg-green-500 text-white py-2 px-4 rounded hover:bg-green-600"
+                  disabled={isLoading}
+                >
+                  Confirm
+                </button>
+                <button
+                  onClick={() => handleConfirmAction(false)}
+                  className="bg-red-500 text-white py-2 px-4 rounded hover:bg-red-600"
+                  disabled={isLoading}
+                >
+                  Cancel
+                </button>
               </div>
             </div>
           )}
           
-          {/* Scroll anchor */}
-          <div ref={messagesEndRef} />
+          {/* Image preview */}
+          {imagePreview && (
+            <div className="mb-4 relative">
+              <img 
+                src={imagePreview} 
+                alt="Selected" 
+                className="h-32 object-contain rounded border border-gray-300" 
+              />
+              <button
+                onClick={handleRemoveImage}
+                className="absolute top-1 right-1 bg-red-500 text-white rounded-full w-6 h-6 flex items-center justify-center"
+              >
+                ×
+              </button>
+            </div>
+          )}
+          
+          {/* Input area */}
+          <form onSubmit={handleSendMessage} className="flex items-center space-x-2">
+            <button
+              type="button"
+              onClick={handleImageUploadClick}
+              className="bg-gray-200 text-gray-700 rounded-lg p-2 hover:bg-gray-300 focus:outline-none"
+              disabled={isLoading}
+            >
+              📷
+            </button>
+            <input
+              type="file"
+              ref={fileInputRef}
+              onChange={handleImageSelect}
+              accept="image/*"
+              className="hidden"
+            />
+            <input
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="Ask about products or shopping..."
+              className="flex-1 border border-gray-300 rounded-lg py-2 px-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
+              disabled={isLoading}
+            />
+            <button
+              type="submit"
+              className="bg-blue-500 text-white rounded-lg py-2 px-4 hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
+              disabled={isLoading || (!input.trim() && !selectedImage)}
+            >
+              Send
+            </button>
+          </form>
         </div>
         
-        {/* Suggested products */}
+        {/* Product carousel */}
         {suggestedProducts.length > 0 && (
-          <div className="mb-4">
-            <h3 className="text-lg font-medium mb-2">Suggested Products</h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="w-80 ml-4 overflow-y-auto border-l border-gray-200 pl-4">
+            <h3 className="text-lg font-medium mb-4">Suggested Products</h3>
+            <div className="space-y-4">
               {suggestedProducts.map((product) => (
                 <div
                   key={product.id}
@@ -186,9 +461,36 @@ export default function ChatPage() {
                   <p className="font-bold">${product.price.toFixed(2)}</p>
                   <button
                     className="mt-2 w-full bg-blue-500 text-white py-1 px-2 rounded hover:bg-blue-600 transition"
-                    onClick={() => {
-                      // In a real app, this would add to cart
-                      alert(`Added ${product.name} to cart`);
+                    onClick={async () => {
+                      try {
+                        const response = await fetch(`http://localhost:8000/api/cart/${sessionId}`, {
+                          method: 'POST',
+                          headers: {
+                            'Content-Type': 'application/json',
+                          },
+                          body: JSON.stringify({
+                            action_type: 'add',
+                            product_id: product.id,
+                            quantity: 1,
+                          }),
+                        });
+                        
+                        if (!response.ok) {
+                          throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        
+                        // Add a message to the chat
+                        const cartMessage: Message = {
+                          id: `cart_${Date.now()}`,
+                          content: `Added ${product.name} to your cart.`,
+                          sender: 'assistant',
+                          timestamp: new Date(),
+                        };
+                        
+                        setMessages((prev) => [...prev, cartMessage]);
+                      } catch (error) {
+                        console.error('Error adding to cart:', error);
+                      }
                     }}
                   >
                     Add to Cart
@@ -198,25 +500,6 @@ export default function ChatPage() {
             </div>
           </div>
         )}
-        
-        {/* Input area */}
-        <form onSubmit={handleSendMessage} className="flex items-center space-x-2">
-          <input
-            type="text"
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="Ask about products or shopping..."
-            className="flex-1 border border-gray-300 rounded-lg py-2 px-4 focus:outline-none focus:ring-2 focus:ring-blue-500"
-            disabled={isLoading}
-          />
-          <button
-            type="submit"
-            className="bg-blue-500 text-white rounded-lg py-2 px-4 hover:bg-blue-600 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50"
-            disabled={isLoading || !input.trim()}
-          >
-            Send
-          </button>
-        </form>
       </div>
     </div>
   );
